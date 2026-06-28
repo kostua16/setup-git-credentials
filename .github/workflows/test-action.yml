@@ -1,0 +1,55 @@
+name: Test action
+on:
+  push:
+    branches: "main"
+    paths-ignore:
+      - .gitignore
+      - README.md
+      - LICENSE
+      - .github/**
+      - "!.github/workflows/test-action.yml"
+  pull_request:
+    paths-ignore:
+      - .gitignore
+      - README.md
+      - LICENSE
+      - .github/**
+      - "!.github/workflows/test-action.yml"
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test-action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Poison git auth config
+        run: |
+          git config --local credential.helper store
+          git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic stale"
+          git config --local url.https://x-access-token:stale@github.com/.insteadOf https://github.com/
+      - name: Configure raw git credentials
+        uses: ./
+        with:
+          token: ${{ github.token }}
+      - run: test -n "$GIT_ASKPASS"
+      - run: test -x "$GIT_ASKPASS"
+      - run: test "$GIT_TERMINAL_PROMPT" = "0"
+      - run: test -n "$GIT_CONFIG_GLOBAL"
+      - run: test -f "$GIT_CONFIG_GLOBAL"
+      - run: test "$GIT_CONFIG_NOSYSTEM" = "1"
+      - run: test -n "$SETUP_GIT_CREDENTIALS_TOKEN"
+      - run: test "$("$GIT_ASKPASS" Username)" = "x-access-token"
+      - run: test "$("$GIT_ASKPASS" Password)" = "$SETUP_GIT_CREDENTIALS_TOKEN"
+      - run: test -z "$(git config --local --get-all credential.helper || true)"
+      - run: test -z "$(git config --local --get-all http.https://github.com/.extraheader || true)"
+      - run: test -z "$(git config --local --get-regexp '^url\..*\.insteadOf$' || true)"
+      - run: grep -q "helper =" "$GIT_CONFIG_GLOBAL"
+      - run: git ls-remote --get-url origin | grep -q '^https://github.com/'
