@@ -61,6 +61,10 @@ Switch raw Git auth more than once in the same job:
 - Creates temp askpass and Git config files under `RUNNER_TEMP`.
 - Clears stale checkout-local GitHub `credential.helper`,
   `http.*.extraheader`, and `url.*.insteadOf` entries for the configured host.
+- Clears checkout v6 local `includeIf.gitdir:*` entries that point to
+  `RUNNER_TEMP` `git-credentials-*.config` files, including worktree patterns.
+- Sanitizes local `remote.origin.url` when it targets the configured GitHub host
+  with embedded username/password credentials.
 - Adds non-tokenized SSH-to-HTTPS rewrites for the configured host.
 - Never writes tokenized URLs or mutates user/global/system Git config.
 
