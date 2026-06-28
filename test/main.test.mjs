@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -134,17 +134,27 @@ test("includeIf outside runner temp or without checkout credential filename is p
   try {
     await inRepo(async (repo) => {
       const outsidePath = join(repo, "git-credentials-outside.config");
+      const prefixLookalikeDir = `${runnerTemp}-outside`;
+      const prefixLookalikePath = join(
+        prefixLookalikeDir,
+        "git-credentials-lookalike.config",
+      );
       const wrongName = join(runnerTemp, "regular-git-config.config");
       writeFileSync(outsidePath, "[user]\n\tname = Example\n");
+      mkdirSync(prefixLookalikeDir);
+      writeFileSync(prefixLookalikePath, "[user]\n\tname = Prefix\n");
       writeFileSync(wrongName, "[user]\n\temail = example@example.com\n");
       const outsideKey = `includeIf.gitdir:${repo}/.git.path`;
+      const prefixLookalikeKey = `includeIf.gitdir:${repo}/prefix-lookalike.path`;
       const wrongNameKey = `includeIf.gitdir:${repo}/.git/worktrees/*.path`;
       git(["config", "--local", outsideKey, outsidePath], repo);
+      git(["config", "--local", prefixLookalikeKey, prefixLookalikePath], repo);
       git(["config", "--local", wrongNameKey, wrongName], repo);
 
       await scrubLocalGitAuthConfig(new URL("https://github.com"));
 
       assert.equal(readConfig(outsideKey, repo), outsidePath);
+      assert.equal(readConfig(prefixLookalikeKey, repo), prefixLookalikePath);
       assert.equal(readConfig(wrongNameKey, repo), wrongName);
     });
   } finally {
@@ -160,6 +170,25 @@ test("embedded remote.origin.url credentials for configured host are cleaned", a
         "--local",
         "remote.origin.url",
         "https://x-access-token:secret-token@github.com/owner/repo.git",
+      ],
+      repo,
+    );
+
+    await scrubLocalGitAuthConfig(new URL("https://github.com"));
+
+    assert.equal(
+      readConfig("remote.origin.url", repo),
+      "https://github.com/owner/repo.git",
+    );
+  });
+
+  await inRepo(async (repo) => {
+    git(
+      [
+        "config",
+        "--local",
+        "remote.origin.url",
+        "https://x-access-token:secret-token@github.com:443/owner/repo.git",
       ],
       repo,
     );

@@ -192,13 +192,11 @@ function normalizePathForComparison(value: string) {
 function isPathUnder(parent: string, child: string) {
   const normalizedParent = normalizePathForComparison(tryRealpath(parent));
   const normalizedChild = normalizePathForComparison(tryRealpath(child));
-  const relative = normalizedChild.slice(normalizedParent.length);
+  if (normalizedChild === normalizedParent) return true;
+  if (!normalizedChild.startsWith(normalizedParent)) return false;
 
-  return (
-    normalizedChild === normalizedParent ||
-    relative.startsWith("/") ||
-    relative.startsWith("\\")
-  );
+  const boundary = normalizedChild.charAt(normalizedParent.length);
+  return boundary === "/" || boundary === "\\";
 }
 
 function isClearlyRunnerTempPath(value: string) {
@@ -256,13 +254,20 @@ function cleanConfiguredHostRemoteUrl(value: string, serverUrl: URL) {
   if (parsed.hostname.toLowerCase() !== serverUrl.hostname.toLowerCase()) {
     return undefined;
   }
-  if (parsed.port !== serverUrl.port) return undefined;
+  if (getComparablePort(parsed) !== getComparablePort(serverUrl)) return undefined;
   if (!parsed.username && !parsed.password) return undefined;
 
   parsed.username = "";
   parsed.password = "";
   parsed.hash = "";
   return parsed.toString();
+}
+
+function getComparablePort(value: URL) {
+  if (value.port) return value.port;
+  if (value.protocol === "https:") return "443";
+  if (value.protocol === "http:") return "80";
+  return "";
 }
 
 async function scrubEmbeddedOriginCredentials(serverUrl: URL) {
