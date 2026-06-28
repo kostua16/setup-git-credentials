@@ -1,29 +1,37 @@
 import * as core from "@actions/core";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, isAbsolute, join, normalize, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 
 const gitTokenEnvName = "SETUP_GIT_CREDENTIALS_TOKEN";
 const gitAuthConfigPattern =
   "^(credential\\.helper|http(\\..*)?\\.extraheader|url\\..*\\.insteadof)$";
+const checkoutIncludeIfPattern = "^includeif\\.gitdir:.*\\.path$";
+
+const emptyScrubResult = {
+  authKeys: 0,
+  checkoutIncludeIfKeys: 0,
+  embeddedOriginCredentials: 0,
+};
 
 type GitConfigEntry = {
   key: string;
   value: string;
 };
 
-function createGitCredentialDir() {
+export function createGitCredentialDir() {
   return mkdtempSync(
     join(process.env.RUNNER_TEMP ?? tmpdir(), "setup-git-credentials-"),
   );
 }
 
-function escapeGitConfigSubsection(value: string) {
+export function escapeGitConfigSubsection(value: string) {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-function createAskpassScript(gitCredentialDir: string) {
+export function createAskpassScript(gitCredentialDir: string) {
   const askpassPath = join(
     gitCredentialDir,
     process.platform === "win32" ? "git-askpass.cmd" : "git-askpass.sh",
@@ -59,7 +67,10 @@ esac
   return askpassPath;
 }
 
-function createTempGlobalGitConfig(gitCredentialDir: string, serverUrl: URL) {
+export function createTempGlobalGitConfig(
+  gitCredentialDir: string,
+  serverUrl: URL,
+) {
   const gitConfigPath = join(gitCredentialDir, "gitconfig");
   const httpsBaseUrl = `${serverUrl.protocol}//${serverUrl.host}/`;
   const sshUrlHost = serverUrl.host;
@@ -78,7 +89,7 @@ function createTempGlobalGitConfig(gitCredentialDir: string, serverUrl: URL) {
   return gitConfigPath;
 }
 
-function sanitizeSecretBearingText(value: string) {
+export function sanitizeSecretBearingText(value: string) {
   return value
     .replace(/(https?:\/\/)(?:[^/\s@]+@)/gi, "$1***@")
     .replace(/(x-access-token:)[^@/\s]+/gi, "$1***")
@@ -117,7 +128,9 @@ async function debugGitAuthConfigOrigins(label: string) {
   }
 }
 
-async function getLocalGitConfigEntries(pattern: string): Promise<GitConfigEntry[]> {
+async function getLocalGitConfigEntries(
+  pattern: string,
+): Promise<GitConfigEntry[]> {
   const result = await execa(
     "git",
     ["config", "--local", "--get-regexp", pattern],
@@ -164,7 +177,132 @@ function shouldUnsetLocalGitAuthConfig(entry: GitConfigEntry, serverUrl: URL) {
   return false;
 }
 
-async function scrubLocalGitAuthConfig(serverUrl: URL) {
+function tryRealpath(value: string) {
+  try {
+    return realpathSync(value);
+  } catch {
+    return value;
+  }
+}
+
+function normalizePathForComparison(value: string) {
+  return normalize(isAbsolute(value) ? value : resolve(value));
+}
+
+function isPathUnder(parent: string, child: string) {
+  const normalizedParent = normalizePathForComparison(tryRealpath(parent));
+  const normalizedChild = normalizePathForComparison(tryRealpath(child));
+  if (normalizedChild === normalizedParent) return true;
+  if (!normalizedChild.startsWith(normalizedParent)) return false;
+
+  const boundary = normalizedChild.charAt(normalizedParent.length);
+  return boundary === "/" || boundary === "\\";
+}
+
+function isClearlyRunnerTempPath(value: string) {
+  const normalized = normalizePathForComparison(value).replace(/\\/g, "/");
+
+  return (
+    /\/_work\/_temp\//i.test(normalized) ||
+    /\/actions-runner\/_work\/_temp\//i.test(normalized) ||
+    /\/runner\/_work\/_temp\//i.test(normalized)
+  );
+}
+
+export function isCheckoutCredentialIncludePath(value: string) {
+  const trimmed = value.trim();
+  if (!/^git-credentials-.+\.config$/i.test(basename(trimmed))) return false;
+
+  const runnerTemp = process.env.RUNNER_TEMP;
+  if (runnerTemp && isPathUnder(runnerTemp, trimmed)) return true;
+
+  return isClearlyRunnerTempPath(trimmed);
+}
+
+function escapeGitConfigValuePattern(value: string) {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+async function unsetLocalGitConfigKey(key: string, exactValue?: string) {
+  const args = ["config", "--local", "--unset-all", key];
+  if (exactValue !== undefined) {
+    args.push(`^${escapeGitConfigValuePattern(exactValue)}$`);
+  }
+
+  const result = await execa("git", args, {
+    reject: false,
+  });
+
+  if (result.exitCode !== 0 && result.exitCode !== 5) {
+    core.debug(`Unable to unset local git config key ${sanitizeSecretBearingText(key)}`);
+    return false;
+  }
+
+  return true;
+}
+
+function cleanConfiguredHostRemoteUrl(value: string, serverUrl: URL) {
+  let parsed: URL;
+
+  try {
+    parsed = new URL(value);
+  } catch {
+    return undefined;
+  }
+
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return undefined;
+  if (parsed.hostname.toLowerCase() !== serverUrl.hostname.toLowerCase()) {
+    return undefined;
+  }
+  if (getComparablePort(parsed) !== getComparablePort(serverUrl)) return undefined;
+  if (!parsed.username && !parsed.password) return undefined;
+
+  parsed.username = "";
+  parsed.password = "";
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+function getComparablePort(value: URL) {
+  if (value.port) return value.port;
+  if (value.protocol === "https:") return "443";
+  if (value.protocol === "http:") return "80";
+  return "";
+}
+
+async function scrubEmbeddedOriginCredentials(serverUrl: URL) {
+  const result = await execa("git", ["config", "--local", "--get", "remote.origin.url"], {
+    reject: false,
+  });
+
+  if (result.exitCode === 1) return false;
+  if (result.exitCode !== 0) {
+    core.debug("Unable to inspect local remote.origin.url");
+    return false;
+  }
+
+  const currentUrl = result.stdout.trim();
+  const cleanUrl = cleanConfiguredHostRemoteUrl(currentUrl, serverUrl);
+  if (!cleanUrl || cleanUrl === currentUrl) return false;
+
+  const setResult = await execa(
+    "git",
+    ["config", "--local", "remote.origin.url", cleanUrl],
+    { reject: false },
+  );
+
+  if (setResult.exitCode !== 0) {
+    core.debug("Unable to sanitize local remote.origin.url");
+    return false;
+  }
+
+  core.debug(
+    `scrubbed embedded credentials from remote.origin.url: ${sanitizeSecretBearingText(cleanUrl)}`,
+  );
+  return true;
+}
+
+export async function scrubLocalGitAuthConfig(serverUrl: URL) {
   const workTreeResult = await execa(
     "git",
     ["rev-parse", "--is-inside-work-tree"],
@@ -173,10 +311,11 @@ async function scrubLocalGitAuthConfig(serverUrl: URL) {
 
   if (workTreeResult.exitCode !== 0 || workTreeResult.stdout.trim() !== "true") {
     core.debug("Skipping local git auth config cleanup outside a git worktree");
-    return 0;
+    return emptyScrubResult;
   }
 
   const entries = await getLocalGitConfigEntries(gitAuthConfigPattern);
+  const includeIfEntries = await getLocalGitConfigEntries(checkoutIncludeIfPattern);
   const keysToUnset = [
     ...new Set(
       entries
@@ -184,22 +323,35 @@ async function scrubLocalGitAuthConfig(serverUrl: URL) {
         .map((entry) => entry.key),
     ),
   ];
+  const includeIfKeysToUnset = [
+    ...includeIfEntries.filter((entry) =>
+      isCheckoutCredentialIncludePath(entry.value),
+    ),
+  ];
 
   for (const key of keysToUnset) {
-    const result = await execa("git", ["config", "--local", "--unset-all", key], {
-      reject: false,
-    });
-    if (result.exitCode !== 0 && result.exitCode !== 5) {
+    await unsetLocalGitConfigKey(key);
+  }
+
+  for (const entry of includeIfKeysToUnset) {
+    const scrubbed = await unsetLocalGitConfigKey(entry.key, entry.value);
+    if (scrubbed) {
       core.debug(
-        `Unable to unset local git config key ${sanitizeSecretBearingText(key)}`,
+        `scrubbed checkout credential includeIf ${sanitizeSecretBearingText(entry.key)} -> ${sanitizeSecretBearingText(entry.value)}`,
       );
     }
   }
 
-  return keysToUnset.length;
+  const scrubbedOriginCredentials = await scrubEmbeddedOriginCredentials(serverUrl);
+
+  return {
+    authKeys: keysToUnset.length,
+    checkoutIncludeIfKeys: includeIfKeysToUnset.length,
+    embeddedOriginCredentials: scrubbedOriginCredentials ? 1 : 0,
+  };
 }
 
-async function configureGitCredentials(serverUrl: URL, token: string) {
+export async function configureGitCredentials(serverUrl: URL, token: string) {
   core.debug("setup-git-credentials: enabled");
   await debugGitAuthConfigOrigins("git auth config before setup");
 
@@ -217,14 +369,29 @@ async function configureGitCredentials(serverUrl: URL, token: string) {
   const scrubbedLocalKeys = await scrubLocalGitAuthConfig(serverUrl);
   core.debug(`git credential temp config: ${gitConfigPath}`);
   core.debug(`git askpass script: ${askpassPath}`);
-  core.debug(`local git auth config keys scrubbed: ${scrubbedLocalKeys}`);
+  core.debug(
+    `local git auth config scrubbed: auth=${scrubbedLocalKeys.authKeys}, checkout-includeIf=${scrubbedLocalKeys.checkoutIncludeIfKeys}, remote-origin=${scrubbedLocalKeys.embeddedOriginCredentials}`,
+  );
   await debugGitAuthConfigOrigins("git auth config after setup");
 }
 
-try {
-  const token = core.getInput("token", { required: true });
-  const serverUrl = new URL(core.getInput("github-server-url"));
-  await configureGitCredentials(serverUrl, token);
-} catch (error) {
-  core.setFailed(error instanceof Error ? error.message : String(error));
+async function run() {
+  try {
+    const token = core.getInput("token", { required: true });
+    const serverUrl = new URL(core.getInput("github-server-url"));
+    await configureGitCredentials(serverUrl, token);
+  } catch (error) {
+    core.setFailed(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function isDirectRun() {
+  const entrypoint = process.argv[1];
+  if (!entrypoint) return false;
+
+  return fileURLToPath(import.meta.url) === resolve(entrypoint);
+}
+
+if (isDirectRun()) {
+  await run();
 }

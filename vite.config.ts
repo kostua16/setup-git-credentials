@@ -7,6 +7,9 @@ export default defineConfig({
     ssr: true,
     rollupOptions: {
       input: ["src/main.ts"],
+      output: {
+        entryFileNames: "main.js",
+      },
     },
   },
   ssr: {
