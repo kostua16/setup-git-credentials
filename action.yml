@@ -1,4 +1,4 @@
-name: Setup Git Credentials
+name: Setup Git Credentials (by kostua16)
 description: Configure raw git credentials for later GitHub Actions job steps
 
 branding:
