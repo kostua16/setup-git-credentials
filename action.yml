@@ -1,0 +1,22 @@
+name: Setup Git Credentials
+description: Configure raw git credentials for later GitHub Actions job steps
+
+branding:
+  icon: git-branch
+  color: blue
+
+inputs:
+  token:
+    description: >
+      Token to use for later raw git commands in this job. Pass the exact PAT
+      or GitHub token that should authenticate git.
+    required: true
+  github-server-url:
+    description: >
+      The GitHub server URL whose git credentials should be configured.
+      Defaults to the current github.server_url.
+    default: ${{ github.server_url }}
+
+runs:
+  using: node24
+  main: dist/main.js
